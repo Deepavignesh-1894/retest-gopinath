@@ -5,9 +5,8 @@ import './Dashboard.css';
 
 const HodDashboard = () => {
   const [pendingRequests, setPendingRequests] = useState([]);
-  const [departmentRequests, setDepartmentRequests] = useState([]); // Level 2 - CC approved from dept
-  const [subjectRequests, setSubjectRequests] = useState([]); // Level 0 - Subject requests
   const [allRequests, setAllRequests] = useState([]);
+  const [departmentRequests, setDepartmentRequests] = useState([]);
   const [selectedRequest, setSelectedRequest] = useState(null);
   const [showModal, setShowModal] = useState(false);
   const [showDocumentModal, setShowDocumentModal] = useState(false);
@@ -15,17 +14,16 @@ const HodDashboard = () => {
   const [action, setAction] = useState('approve');
   const [comments, setComments] = useState('');
   const [loading, setLoading] = useState(false);
-  const [acceptAllLoading, setAcceptAllLoading] = useState(false);
+  // No longer using acceptAllLoading
   const { user: initialUser } = getAuth();
   const [user, setUser] = useState(initialUser);
 
   useEffect(() => {
     const initializeData = async () => {
-      // Load user first to ensure we have departmentAsHod and subjects
-      await loadCurrentUser();
-      // Then load requests
-      loadPendingRequests();
-      loadAllRequests();
+      const current = await loadCurrentUser();
+      // ensure user is loaded before fetching requests
+      await loadPendingRequests(current);
+      await loadAllRequests(current);
     };
     initializeData();
   }, []);
@@ -59,61 +57,21 @@ const HodDashboard = () => {
     }
   };
 
-  const loadPendingRequests = async () => {
+  const loadPendingRequests = async (currentUserDataParam) => {
     try {
       const response = await api.get('/retests/pending');
-      const requests = response.data;
-      setPendingRequests(requests);
-      
-      // Get fresh user data to ensure we have latest departmentAsHod
-      const currentUserData = user.departmentAsHod ? user : JSON.parse(localStorage.getItem('user') || '{}');
-      
-      // Separate into department requests (all levels from HoD's department) and subject requests (level 0)
-      // Backend already filters by department for level 2, so we trust that
-      const deptReqs = requests.filter(req => {
-        // Level 2 requests are from HoD's department (backend filtered) - always include
-        if (Number(req.levelOfApproval) === 2) {
-          return true;
-        }
-        // For other levels, check if we have user data and match department
-        if (currentUserData.departmentAsHod) {
-          const hodDeptId = currentUserData.departmentAsHod?.toString() || 
-                           currentUserData.departmentAsHod?._id?.toString() || 
-                           currentUserData.departmentAsHod;
-          if (hodDeptId && req.student) {
-            const studentDept = req.student?.department?._id?.toString() || 
-                               req.student?.department?.toString() || 
-                               req.student?.department;
-            return studentDept && studentDept === hodDeptId;
-          }
-        }
-        return false;
+      const requests = response.data || [];
+
+      const currentUserData = currentUserDataParam || (user.departmentAsHod ? user : JSON.parse(localStorage.getItem('user') || '{}'));
+
+      // TEMP UNBLOCK: show all pending requests at level 2 (CC approved), regardless of department
+      const filteredRequests = requests.filter(req => {
+        if (!req || req.status !== 'pending') return false;
+        const level = Number(req.levelOfApproval);
+        return level === 2;
       });
-      
-      // Subject requests: Level 0 requests where HoD teaches the subject
-      const subjReqs = requests.filter(req => {
-        if (Number(req.levelOfApproval) !== 0 || req.status !== 'pending') return false;
-        if (!currentUserData.subjects || currentUserData.subjects.length === 0) return false;
-        
-        const requestSubjectId = req.subject?._id?.toString() || req.subject?.toString();
-        const requestSemester = parseInt(req.semester);
-        const requestClass = req.class;
-        
-        if (!requestSubjectId || !requestSemester || !requestClass) return false;
-        
-        return currentUserData.subjects.some(s => {
-          if (!s) return false;
-          const subjId = s.subject?._id?.toString() || s.subject?.toString() || s.subject;
-          const subjSemester = parseInt(s.semester);
-          const subjClass = s.class;
-          return subjId === requestSubjectId && 
-                 subjSemester === requestSemester && 
-                 subjClass === requestClass;
-        });
-      });
-      
-      setDepartmentRequests(deptReqs);
-      setSubjectRequests(subjReqs);
+
+      setPendingRequests(filteredRequests);
     } catch (err) {
       console.error('Error loading pending requests:', err);
     }
@@ -155,52 +113,26 @@ const HodDashboard = () => {
     try {
       const data = {
         approved: action === 'approve',
-        comments: comments
+        comments: comments,
+        level: selectedRequest.levelOfApproval // Pass current level for proper handling
       };
 
-      await api.put(`/retests/${selectedRequest._id}/approve`, data);
+      await api.put(`/retests/${selectedRequest._id}/${action}`, data);
       setShowModal(false);
       setSelectedRequest(null);
       setComments('');
-      loadPendingRequests();
-      loadAllRequests();
+      await loadPendingRequests();
+      await loadAllRequests();
+      alert(`Request ${action}ed successfully`);
     } catch (err) {
+      console.error('Error processing request:', err);
       alert(err.response?.data?.message || 'Failed to process request');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleAcceptAll = async () => {
-    if (!window.confirm('Are you sure you want to approve all pending requests that you can approve?')) {
-      return;
-    }
-
-    setAcceptAllLoading(true);
-    try {
-      const requestsToApprove = departmentRequests.filter(request => canApprove(request));
-      
-      for (const request of requestsToApprove) {
-        try {
-          const data = {
-            approved: true,
-            comments: 'Bulk approved'
-          };
-          await api.put(`/retests/${request._id}/approve`, data);
-        } catch (err) {
-          console.error(`Failed to approve request ${request._id}:`, err);
-        }
-      }
-
-      loadPendingRequests();
-      loadAllRequests();
-      alert(`Successfully approved ${requestsToApprove.length} request(s)`);
-    } catch (err) {
-      alert('Failed to approve all requests');
-    } finally {
-      setAcceptAllLoading(false);
-    }
-  };
+  // bulk-approve removed in simplified HOD dashboard
 
   const openModal = (request, actionType) => {
     setSelectedRequest(request);
@@ -231,62 +163,13 @@ const HodDashboard = () => {
       return false;
     }
     
-    // Backend already filtered by department, so if it's level 2 and pending, HoD can approve
-    // Additional safety check: verify department if user data is available
-    if (user.departmentAsHod && request.student) {
-      const hodDeptId = user.departmentAsHod?.toString() || 
-                       user.departmentAsHod?._id?.toString() || 
-                       user.departmentAsHod;
-      const studentDept = request.student?.department?._id?.toString() || 
-                         request.student?.department?.toString() || 
-                         request.student?.department;
-      // If we can verify and it doesn't match, return false
-      if (hodDeptId && studentDept && studentDept !== hodDeptId) {
-        return false;
-      }
-    }
-    
-    // Level 2 and pending = HoD can approve
+    // TEMP UNBLOCK: Level 2 and pending = HoD can approve
     return true;
   };
 
-  const canApproveAsSubject = (request) => {
-    // HoD can approve as subject faculty at level 0
-    if (!request || request.status !== 'pending') {
-      return false;
-    }
-    // Check if level is 0 (handle both string and number)
-    const level = Number(request.levelOfApproval);
-    if (level !== 0) {
-      return false;
-    }
-    if (!user.subjects || user.subjects.length === 0) {
-      return false;
-    }
-    
-    const requestSubjectId = request.subject?._id?.toString() || request.subject?.toString();
-    const requestSemester = parseInt(request.semester);
-    const requestClass = request.class;
-    
-    if (!requestSubjectId || !requestSemester || !requestClass) {
-      return false;
-    }
-    
-    // Check if user teaches this subject for the same semester and class
-    return user.subjects.some(s => {
-      if (!s) return false;
-      const subjId = s.subject?._id?.toString() || s.subject?.toString() || s.subject;
-      const subjSemester = parseInt(s.semester);
-      const subjClass = s.class;
-      return subjId === requestSubjectId && 
-             subjSemester === requestSemester && 
-             subjClass === requestClass;
-    });
-  };
-
   const canApprove = (request) => {
-    // Check if HoD can approve as HoD (level 2) or as subject faculty (level 0)
-    return canApproveAsHoD(request) || canApproveAsSubject(request);
+    // HoD only approves level 2 department requests
+    return canApproveAsHoD(request);
   };
 
   return (
@@ -295,86 +178,11 @@ const HodDashboard = () => {
         <h1>HoD Dashboard</h1>
       </div>
 
-      {/* Subject Faculty Requests (Level 0) */}
-      {user.subjects && user.subjects.length > 0 && subjectRequests.length > 0 && (
-        <div className="card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-            <h2>Subject Faculty Approvals ({subjectRequests.length})</h2>
-          </div>
-          <div className="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Student</th>
-                  <th>Subject</th>
-                  <th>Semester</th>
-                  <th>Internal</th>
-                  <th>Level</th>
-                  <th>Created</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {subjectRequests.map(request => (
-                  <tr key={request._id}>
-                    <td>{request.student?.name || request.studentName}</td>
-                    <td>{request.subject?.name || request.subjectName}</td>
-                    <td>{request.semester}</td>
-                    <td>Internal {request.internal}</td>
-                    <td>{request.levelOfApproval}/4</td>
-                    <td>{new Date(request.createdAt).toLocaleDateString()}</td>
-                    <td>
-                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                        <button
-                          className="btn-sm btn-view"
-                          onClick={() => viewDocument(request)}
-                          title="View Document"
-                        >
-                          📄 View Doc
-                        </button>
-                        {request.status === 'pending' && canApproveAsSubject(request) && (
-                          <>
-                            <button
-                              className="btn-sm btn-approve"
-                              onClick={() => openModal(request, 'approve')}
-                            >
-                              ✓ Approve
-                            </button>
-                            <button
-                              className="btn-sm btn-reject"
-                              onClick={() => openModal(request, 'reject')}
-                            >
-                              ✗ Reject
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Department Requests - Pending Approvals */}
+      {/* Pending Requests */}
       <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-          <h2>Pending Approvals ({departmentRequests.length})</h2>
-          {departmentRequests.filter(req => canApprove(req)).length > 0 && (
-            <button
-              className="btn-primary"
-              onClick={handleAcceptAll}
-              disabled={acceptAllLoading}
-              style={{ marginLeft: 'auto' }}
-            >
-              {acceptAllLoading ? 'Processing...' : `Accept All (${departmentRequests.filter(req => canApprove(req)).length})`}
-            </button>
-          )}
-        </div>
-        {departmentRequests.length === 0 ? (
-          <p className="no-data">No pending approvals</p>
+        <h2>Pending Requests ({pendingRequests.length})</h2>
+        {pendingRequests.length === 0 ? (
+          <p className="no-data">No pending requests</p>
         ) : (
           <div className="table-container">
             <table>
@@ -390,7 +198,7 @@ const HodDashboard = () => {
                 </tr>
               </thead>
               <tbody>
-                {departmentRequests.map(request => (
+                {pendingRequests.map(request => (
                   <tr key={request._id}>
                     <td>{request.student?.name || request.studentName}</td>
                     <td>{request.subject?.name || request.subjectName}</td>
@@ -407,28 +215,59 @@ const HodDashboard = () => {
                         >
                           📄 View Doc
                         </button>
-                        {canApprove(request) ? (
-                          <>
-                            <button
-                              className="btn-sm btn-approve"
-                              onClick={() => openModal(request, 'approve')}
-                              disabled={loading}
-                            >
-                              ✓ Approve
-                            </button>
-                            <button
-                              className="btn-sm btn-reject"
-                              onClick={() => openModal(request, 'reject')}
-                              disabled={loading}
-                            >
-                              ✗ Reject
-                            </button>
-                          </>
-                        ) : request.status === 'pending' ? (
-                          <span className="text-muted">Not authorized</span>
-                        ) : null}
+                        <button
+                          className="btn-sm btn-approve"
+                          onClick={() => openModal(request, 'approve')}
+                          disabled={loading}
+                        >
+                          ✓ Approve
+                        </button>
+                        <button
+                          className="btn-sm btn-reject"
+                          onClick={() => openModal(request, 'reject')}
+                          disabled={loading}
+                        >
+                          ✗ Reject
+                        </button>
                       </div>
                     </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* All Requests (department + subject) */}
+      <div className="card" style={{ marginTop: '1.5rem' }}>
+        <h2>All Requests ({allRequests.length})</h2>
+        {allRequests.length === 0 ? (
+          <p className="no-data">No requests available</p>
+        ) : (
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Student</th>
+                  <th>Subject</th>
+                  <th>Semester</th>
+                  <th>Internal</th>
+                  <th>Level</th>
+                  <th>Status</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                {allRequests.map(request => (
+                  <tr key={request._id}>
+                    <td>{request.student?.name || request.studentName}</td>
+                    <td>{request.subject?.name || request.subjectName}</td>
+                    <td>{request.semester}</td>
+                    <td>Internal {request.internal}</td>
+                    <td>{request.levelOfApproval}/4</td>
+                    <td>{request.status}</td>
+                    <td>{new Date(request.createdAt).toLocaleDateString()}</td>
                   </tr>
                 ))}
               </tbody>

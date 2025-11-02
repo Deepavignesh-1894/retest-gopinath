@@ -27,30 +27,31 @@ const Login = () => {
 
     try {
       const response = await api.post('/auth/login', formData);
-      setAuth(response.data.token, response.data.user);
+      const { token, user } = response.data;
       
-      // Redirect based on role and class counsellor status
-      const role = response.data.user.role;
-      const isClassCounsellor = response.data.user.isClassCounsellor;
+      // Store complete user data including departmentAsHod
+      setAuth(token, user);
       
-      if (role === 'student') {
-        navigate('/dashboard/student');
-      } else if (role === 'faculty' || role === 'hod') {
-        // If they're a class counsellor, send to class counsellor dashboard
-        if (isClassCounsellor) {
-          navigate('/dashboard/class-counsellor');
-        } else {
-          navigate('/dashboard/faculty');
-        }
-      } else if (role === 'hod' && !isClassCounsellor) {
-        navigate('/dashboard/hod');
-      } else if (role === 'dean') {
-        navigate('/dashboard/dean');
-      } else if (role === 'admin') {
-        navigate('/dashboard/admin');
+      // Determine the correct dashboard route
+      let dashboardRoute;
+      if (user.role === 'hod') {
+        // HOD users always go to HOD dashboard first
+        dashboardRoute = '/dashboard/hod';
+      } else if (user.role === 'faculty' && user.isClassCounsellor) {
+        dashboardRoute = '/dashboard/class-counsellor';
+      } else if (user.role === 'faculty') {
+        dashboardRoute = '/dashboard/faculty';
+      } else if (user.role === 'student') {
+        dashboardRoute = '/dashboard/student';
+      } else if (user.role === 'dean') {
+        dashboardRoute = '/dashboard/dean';
+      } else if (user.role === 'admin') {
+        dashboardRoute = '/dashboard/admin';
       } else {
-        navigate('/login');
+        dashboardRoute = '/login';
       }
+
+      navigate(dashboardRoute);
     } catch (err) {
       setError(err.response?.data?.message || 'Login failed. Please try again.');
     } finally {
@@ -103,5 +104,3 @@ const Login = () => {
 };
 
 export default Login;
-
-

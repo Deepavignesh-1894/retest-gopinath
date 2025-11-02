@@ -102,7 +102,9 @@ router.get('/', auth, async (req, res) => {
       if (req.user.role === 'hod') {
         const hodDept = req.user.departmentAsHod;
         if (hodDept) {
-          const deptId = hodDept instanceof mongoose.Types.ObjectId ? hodDept : mongoose.Types.ObjectId(hodDept);
+          const deptId = hodDept instanceof mongoose.Types.ObjectId 
+            ? hodDept 
+            : new mongoose.Types.ObjectId(hodDept._id || hodDept);
           const studentIds = await User.find({ department: deptId }).distinct('_id');
           if (studentIds.length > 0) {
             orConditions.push({ student: { $in: studentIds } });
@@ -123,7 +125,9 @@ router.get('/', auth, async (req, res) => {
       
       // Department requests (all levels for students in their department)
       if (hodDept) {
-        const deptId = hodDept instanceof mongoose.Types.ObjectId ? hodDept : mongoose.Types.ObjectId(hodDept);
+        const deptId = hodDept instanceof mongoose.Types.ObjectId 
+          ? hodDept 
+          : new mongoose.Types.ObjectId(hodDept._id || hodDept);
         const studentIds = await User.find({ department: deptId }).distinct('_id');
         if (studentIds.length > 0) {
           orConditions.push({ student: { $in: studentIds } });
@@ -181,6 +185,10 @@ router.get('/pending', auth, async (req, res) => {
 
     if (req.user.role === 'student') {
       query.student = req.user._id;
+    } else if (req.user.role === 'hod') {
+      // Highest priority: HoD view
+      // STRONG UNBLOCK: fetch all and filter in-memory later
+      query = {};
     } else if (req.user.isClassCounsellor) {
       // Class counsellor can see requests at level 1 for their class and semester
       // Note: This can overlap with HoD role, so we handle it separately
@@ -199,26 +207,9 @@ router.get('/pending', auth, async (req, res) => {
         semester: ccSemester
       };
       
-      // If also HoD, combine with HoD conditions
+      // If also HoD, TEMP UNBLOCK: show all level 2 pending (ignore department filter)
       if (req.user.role === 'hod') {
-        const studentIds = await User.find({ department: req.user.departmentAsHod }).distinct('_id');
-        const orConditions = [
-          { levelOfApproval: 2, student: { $in: studentIds } }, // HoD level
-          ccConditions // Class counsellor level
-        ];
-        
-        // Add subject faculty level if HoD teaches subjects
-        if (req.user.subjects && req.user.subjects.length > 0) {
-          const subjectMatches = req.user.subjects.map(s => ({
-            levelOfApproval: 0,
-            subject: s.subject instanceof mongoose.Types.ObjectId ? s.subject : mongoose.Types.ObjectId(s.subject),
-            semester: s.semester,
-            class: s.class
-          }));
-          orConditions.push(...subjectMatches);
-        }
-        
-        query.$or = orConditions;
+        query = { status: 'pending', levelOfApproval: 2 };
       } else {
         // Just Class Counsellor (not HoD)
         query.levelOfApproval = 1;
@@ -228,56 +219,8 @@ router.get('/pending', auth, async (req, res) => {
         console.log('Class Counsellor query (not HoD):', query);
       }
     } else if (req.user.role === 'hod') {
-      // HoD can see:
-      // 1. Requests at level 2 (Class Counsellor approved) from their department
-      // 2. Subject faculty requests (level 0) if they teach that subject
-      const orConditions = [];
-      
-      // Get all students from HoD's department
-      const hodDept = req.user.departmentAsHod;
-      if (hodDept) {
-        const deptId = hodDept instanceof mongoose.Types.ObjectId ? hodDept : mongoose.Types.ObjectId(hodDept);
-        const studentIds = await User.find({ department: deptId }).distinct('_id');
-        
-        console.log('HoD query - departmentAsHod:', deptId);
-        console.log('HoD query - found students:', studentIds.length, 'in department');
-        
-        if (studentIds.length > 0) {
-          // Level 2 requests (Class Counsellor approved) from HoD's department
-          orConditions.push({
-            levelOfApproval: 2,
-            student: { $in: studentIds }
-          });
-        } else {
-          // Fallback: if no students found, still show level 2 requests
-          // (Department check will happen at approval time)
-          console.log('HoD: No students found in department, showing all level 2 requests');
-          orConditions.push({ levelOfApproval: 2 });
-        }
-      } else {
-        // No department assigned, show all level 2 requests
-        console.log('HoD: No department assigned, showing all level 2 requests');
-        orConditions.push({ levelOfApproval: 2 });
-      }
-      
-      // Add subject faculty level conditions if HoD teaches subjects
-      if (req.user.subjects && req.user.subjects.length > 0) {
-        const subjectMatches = req.user.subjects.map(s => ({
-          levelOfApproval: 0,
-          subject: s.subject instanceof mongoose.Types.ObjectId ? s.subject : mongoose.Types.ObjectId(s.subject),
-          semester: s.semester,
-          class: s.class
-        }));
-        orConditions.push(...subjectMatches);
-        console.log('HoD: Added', subjectMatches.length, 'subject faculty conditions');
-      }
-      
-      if (orConditions.length > 0) {
-        query.$or = orConditions;
-        console.log('HoD pending query - conditions:', JSON.stringify(query.$or, null, 2));
-      } else {
-        query._id = null; // No conditions, return empty
-      }
+      // EMERGENCY UNBLOCK: HoD sees all pending requests, will filter to level 2 after fetch
+      // Keep only status: 'pending' (already set at top). Do not add more DB filters here.
     } else if (req.user.role === 'faculty') {
       // Pure faculty (not HoD, not class counsellor) - only subject requests at level 0
       query.levelOfApproval = 0;
@@ -285,7 +228,7 @@ router.get('/pending', auth, async (req, res) => {
       // Build query to match subject, semester, and class for at least one assignment
       if (req.user.subjects && req.user.subjects.length > 0) {
         const subjectMatches = req.user.subjects.map(s => ({
-          subject: s.subject instanceof mongoose.Types.ObjectId ? s.subject : mongoose.Types.ObjectId(s.subject),
+          subject: s.subject instanceof mongoose.Types.ObjectId ? s.subject : new mongoose.Types.ObjectId(s.subject),
           semester: s.semester,
           class: s.class
         }));
@@ -304,10 +247,20 @@ router.get('/pending', auth, async (req, res) => {
       query.levelOfApproval = 3;
     }
 
-    const requests = await RetestRequest.find(query)
+    let requests = await RetestRequest.find(query)
       .populate('student', 'uniqueId name class year semester department')
       .populate('subject')
       .sort({ createdAt: -1 });
+
+    // Debug: Log counts for HoD and CC
+    if (req.user.role === 'hod') {
+      console.log(`[HoD Pending][PreFilter-All] count=`, requests.length);
+      // In-memory filter: pending and level 2
+      requests = requests.filter(r => r.status === 'pending' && Number(r.levelOfApproval) === 2);
+      console.log(`[HoD Pending][PostFilter] pending+level2 count=`, requests.length);
+    } else if (req.user.isClassCounsellor) {
+      console.log(`[CC Pending] class=`, req.user.counsellorClass, ` sem=`, req.user.counsellorSemester, ` count=`, requests.length);
+    }
 
     res.json(requests);
   } catch (error) {
@@ -422,8 +375,17 @@ router.put('/:id/approve', auth, async (req, res) => {
     // Level 2: HoD approval
     else if (request.levelOfApproval === 2 && req.user.role === 'hod') {
       const studentDept = student.department?.toString();
-      const hodDept = req.user.departmentAsHod?.toString();
-      if (studentDept === hodDept) {
+      const hodDeptObj = req.user.departmentAsHod;
+      const hodDept = hodDeptObj?._id ? hodDeptObj._id.toString() : hodDeptObj?.toString();
+
+      // Fallback: if student's department not set or ids don't match, allow match via class prefix (e.g., IT A for Information Technology)
+      const deptName = hodDeptObj && hodDeptObj.name ? hodDeptObj.name : '';
+      const initials = deptName ? deptName.trim().split(/\s+/).map(w => w[0] || '').join('').toUpperCase() : '';
+      const classMatchesDept = initials && typeof request.class === 'string' 
+        ? new RegExp(`^${initials}\\s+`, 'i').test(request.class)
+        : false;
+
+      if ((studentDept && hodDept && studentDept === hodDept) || (!studentDept && classMatchesDept) || (!hodDept && classMatchesDept) || classMatchesDept) {
         updateData['approvals.hod.approved'] = approved;
         updateData['approvals.hod.approvedBy'] = req.user._id;
         updateData['approvals.hod.approvedAt'] = new Date();

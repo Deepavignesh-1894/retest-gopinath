@@ -132,9 +132,29 @@ router.post('/login', async (req, res) => {
 router.get('/me', require('../middleware/auth'), async (req, res) => {
   try {
     const user = await User.findById(req.user._id)
-      .populate('department departmentAsHod subjects.subject');
+      .populate('department')
+      .populate('departmentAsHod')
+      .populate('subjects.subject');
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Add specific check for HOD role
+    if (user.role === 'hod' && !user.departmentAsHod) {
+      return res.status(403).json({
+        message: 'HOD department not assigned. Please contact the administrator.',
+        user: {
+          role: user.role,
+          name: user.name,
+          departmentAsHod: null
+        }
+      });
+    }
+
     res.json(user);
   } catch (error) {
+    console.error('Error in /me route:', error);
     res.status(500).json({ message: error.message });
   }
 });
