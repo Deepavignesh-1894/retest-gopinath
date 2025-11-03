@@ -187,8 +187,32 @@ router.get('/pending', auth, async (req, res) => {
       query.student = req.user._id;
     } else if (req.user.role === 'hod') {
       // Highest priority: HoD view
-      // STRONG UNBLOCK: fetch all and filter in-memory later
-      query = {};
+      // Restore per-department filtering with class-initials fallback
+      const hodDeptObj = req.user.departmentAsHod;
+      if (hodDeptObj) {
+        const deptId = hodDeptObj instanceof mongoose.Types.ObjectId
+          ? hodDeptObj
+          : new mongoose.Types.ObjectId(hodDeptObj._id || hodDeptObj);
+        const studentIds = await User.find({ department: deptId }).distinct('_id');
+        const deptName = (hodDeptObj.name || '').trim();
+        const initials = deptName.split(/\s+/).map(w => w[0] || '').join('').toUpperCase();
+        const classRegex = initials ? new RegExp(`^${initials}\\s+`, 'i') : null;
+
+        const orList = [];
+        if (studentIds.length > 0) {
+          orList.push({ levelOfApproval: 2, student: { $in: studentIds } });
+        }
+        if (classRegex) {
+          orList.push({ levelOfApproval: 2, class: { $regex: classRegex } });
+        }
+        if (orList.length > 0) {
+          query = { status: 'pending', $or: orList };
+        } else {
+          query._id = null; // No conditions will yield empty
+        }
+      } else {
+        query._id = null;
+      }
     } else if (req.user.isClassCounsellor) {
       // Class counsellor can see requests at level 1 for their class and semester
       // Note: This can overlap with HoD role, so we handle it separately
@@ -247,17 +271,14 @@ router.get('/pending', auth, async (req, res) => {
       query.levelOfApproval = 3;
     }
 
-    let requests = await RetestRequest.find(query)
+    const requests = await RetestRequest.find(query)
       .populate('student', 'uniqueId name class year semester department')
       .populate('subject')
       .sort({ createdAt: -1 });
 
     // Debug: Log counts for HoD and CC
     if (req.user.role === 'hod') {
-      console.log(`[HoD Pending][PreFilter-All] count=`, requests.length);
-      // In-memory filter: pending and level 2
-      requests = requests.filter(r => r.status === 'pending' && Number(r.levelOfApproval) === 2);
-      console.log(`[HoD Pending][PostFilter] pending+level2 count=`, requests.length);
+      console.log(`[HoD Pending] dept=`, req.user.departmentAsHod && req.user.departmentAsHod.name, ` count=`, requests.length);
     } else if (req.user.isClassCounsellor) {
       console.log(`[CC Pending] class=`, req.user.counsellorClass, ` sem=`, req.user.counsellorSemester, ` count=`, requests.length);
     }
